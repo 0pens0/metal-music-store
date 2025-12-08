@@ -66,6 +66,34 @@ def get_db_connection():
         password=DB_PASSWORD
     )
 
+def init_store_db():
+    """Initialize store database tables"""
+    try:
+        with get_db_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute('''CREATE TABLE IF NOT EXISTS albums (
+                    id SERIAL PRIMARY KEY,
+                    name VARCHAR(255) NOT NULL,
+                    artist VARCHAR(255) NOT NULL,
+                    price DECIMAL(10,2) NOT NULL,
+                    cover_url TEXT,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                )''')
+                cur.execute('''CREATE TABLE IF NOT EXISTS orders (
+                    id SERIAL PRIMARY KEY,
+                    album_id INTEGER NOT NULL,
+                    quantity INTEGER NOT NULL,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    FOREIGN KEY (album_id) REFERENCES albums(id) ON DELETE CASCADE
+                )''')
+                conn.commit()
+    except Exception as e:
+        print(f"Error initializing store database: {e}")
+
+# Initialize database on startup
+init_store_db()
+
 def allowed_file(filename):
     return '.' in filename and filename.rsplit('.', 1)[1].lower() in {'png', 'jpg', 'jpeg', 'gif'}
 
