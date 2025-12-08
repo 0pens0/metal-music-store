@@ -1,0 +1,63 @@
+---
+applications:
+  - name: store-service
+    buildpack: python_buildpack
+    memory: 512M
+    disk_quota: 1G
+    instances: 1
+    path: .
+    routes:
+      - route: store-service-metal-music-store.apps.tanzuplatformdemo.com
+    env:
+      CART_SERVICE_URL: https://cart-service-metal-music-store.apps.tanzuplatformdemo.com
+      ORDER_SERVICE_URL: https://order-service-metal-music-store.apps.tanzuplatformdemo.com
+      USERS_SERVICE_URL: https://users-service-metal-music-store.apps.tanzuplatformdemo.com
+    services:
+      - postgres
+    health-check-type: http
+    health-check-http-endpoint: /
+
+  - name: cart-service
+    buildpack: python_buildpack
+    memory: 256M
+    disk_quota: 512M
+    instances: 1
+    path: ./cart-service
+    routes:
+      - route: cart-service-metal-music-store.apps.tanzuplatformdemo.com
+    env:
+      STORE_SERVICE_URL: https://store-service-metal-music-store.apps.tanzuplatformdemo.com
+      ORDER_SERVICE_URL: https://order-service-metal-music-store.apps.tanzuplatformdemo.com
+    services:
+      - postgres
+    health-check-type: http
+    health-check-http-endpoint: /health
+
+  - name: order-service
+    buildpack: python_buildpack
+    memory: 256M
+    disk_quota: 512M
+    instances: 1
+    path: ./order-service
+    routes:
+      - route: order-service-metal-music-store.apps.tanzuplatformdemo.com
+    env:
+      STORE_SERVICE_URL: https://store-service-metal-music-store.apps.tanzuplatformdemo.com
+    services:
+      - postgres
+    health-check-type: http
+    health-check-http-endpoint: /health
+
+  - name: users-service
+    buildpack: python_buildpack
+    memory: 256M
+    disk_quota: 512M
+    instances: 1
+    path: ./users-service
+    routes:
+      - route: users-service-metal-music-store.apps.tanzuplatformdemo.com
+    services:
+      - postgres
+    health-check-type: http
+    health-check-http-endpoint: /health
+
