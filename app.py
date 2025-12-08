@@ -67,7 +67,7 @@ def get_db_connection():
     )
 
 def init_store_db():
-    """Initialize store database tables"""
+    """Initialize store database tables and insert sample data"""
     try:
         with get_db_connection() as conn:
             with conn.cursor() as cur:
@@ -87,6 +87,21 @@ def init_store_db():
                     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                     FOREIGN KEY (album_id) REFERENCES albums(id) ON DELETE CASCADE
                 )''')
+                
+                # Insert sample albums if table is empty
+                cur.execute('SELECT COUNT(*) FROM albums')
+                album_count = cur.fetchone()[0]
+                if album_count == 0:
+                    cur.execute('''INSERT INTO albums (name, artist, price, cover_url) VALUES
+                        ('Vulgar Display of Power', 'Pantera', 24.99, '/static/covers/Pantera-VulgarDisplayofPower.jpg'),
+                        ('...And Justice for All', 'Metallica', 22.99, '/static/covers/Metallica_-_...And_Justice_for_All_cover.jpg'),
+                        ('Superunknown', 'Soundgarden', 21.99, '/static/covers/Sound_garden-Superunknown.jpg'),
+                        ('Colony', 'In Flames', 19.99, '/static/covers/Inflames_colony.jpeg'),
+                        ('System of a Down', 'System of a Down', 20.99, '/static/covers/System_of_a_down-system_of_a_down.jpg'),
+                        ('Somewhere in Time', 'Iron Maiden', 23.99, '/static/covers/Iron_Maiden-Somewhere_in_Time.jpg')
+                    ''')
+                    print(f"Inserted {cur.rowcount} sample albums")
+                
                 conn.commit()
     except Exception as e:
         print(f"Error initializing store database: {e}")
