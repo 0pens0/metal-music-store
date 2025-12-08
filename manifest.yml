@@ -7,11 +7,11 @@ applications:
     instances: 1
     path: .
     routes:
-      - route: store-service-metal-music-store.apps.tanzuplatformdemo.com
+      - route: store-service-metal-music-store.apps.tp.penso.io
     env:
-      CART_SERVICE_URL: https://cart-service-metal-music-store.apps.tanzuplatformdemo.com
-      ORDER_SERVICE_URL: https://order-service-metal-music-store.apps.tanzuplatformdemo.com
-      USERS_SERVICE_URL: https://users-service-metal-music-store.apps.tanzuplatformdemo.com
+      CART_SERVICE_URL: https://cart-service-metal-music-store.apps.tp.penso.io
+      ORDER_SERVICE_URL: https://order-service-metal-music-store.apps.tp.penso.io
+      USERS_SERVICE_URL: https://users-service-metal-music-store.apps.tp.penso.io
     services:
       - postgres
     health-check-type: http
@@ -24,10 +24,10 @@ applications:
     instances: 1
     path: ./cart-service
     routes:
-      - route: cart-service-metal-music-store.apps.tanzuplatformdemo.com
+      - route: cart-service-metal-music-store.apps.tp.penso.io
     env:
-      STORE_SERVICE_URL: https://store-service-metal-music-store.apps.tanzuplatformdemo.com
-      ORDER_SERVICE_URL: https://order-service-metal-music-store.apps.tanzuplatformdemo.com
+      STORE_SERVICE_URL: https://store-service-metal-music-store.apps.tp.penso.io
+      ORDER_SERVICE_URL: https://order-service-metal-music-store.apps.tp.penso.io
     services:
       - postgres
     health-check-type: http
@@ -40,9 +40,9 @@ applications:
     instances: 1
     path: ./order-service
     routes:
-      - route: order-service-metal-music-store.apps.tanzuplatformdemo.com
+      - route: order-service-metal-music-store.apps.tp.penso.io
     env:
-      STORE_SERVICE_URL: https://store-service-metal-music-store.apps.tanzuplatformdemo.com
+      STORE_SERVICE_URL: https://store-service-metal-music-store.apps.tp.penso.io
     services:
       - postgres
     health-check-type: http
@@ -55,7 +55,7 @@ applications:
     instances: 1
     path: ./users-service
     routes:
-      - route: users-service-metal-music-store.apps.tanzuplatformdemo.com
+      - route: users-service-metal-music-store.apps.tp.penso.io
     services:
       - postgres
     health-check-type: http
