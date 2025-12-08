@@ -90,6 +90,16 @@ def init_users_db():
                              ('admin', admin_password_hash, 'admin'))
                     print("Created default admin user: admin/admin")
                 
+                # Check if customer user exists, if not create it
+                cur.execute('SELECT id FROM users WHERE username = %s', ('customer',))
+                customer_exists = cur.fetchone()
+                if not customer_exists:
+                    # Create customer user with password 'password'
+                    customer_password_hash = hashlib.sha256('password'.encode()).hexdigest()
+                    cur.execute('INSERT INTO users (username, password_hash, role) VALUES (%s, %s, %s)', 
+                             ('customer', customer_password_hash, 'user'))
+                    print("Created default customer user: customer/password")
+                
                 conn.commit()
     except Exception as e:
         print(f"Error initializing users database: {e}")
