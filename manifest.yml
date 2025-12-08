@@ -6,6 +6,7 @@ applications:
     disk_quota: 1G
     instances: 1
     path: .
+    command: python app.py
     routes:
       - route: store-service-metal-music-store.apps.tp.penso.io
     env:
@@ -23,6 +24,7 @@ applications:
     disk_quota: 512M
     instances: 1
     path: ./cart-service
+    command: python app.py
     routes:
       - route: cart-service-metal-music-store.apps.tp.penso.io
     env:
@@ -39,6 +41,7 @@ applications:
     disk_quota: 512M
     instances: 1
     path: ./order-service
+    command: python app.py
     routes:
       - route: order-service-metal-music-store.apps.tp.penso.io
     env:
@@ -54,6 +57,7 @@ applications:
     disk_quota: 512M
     instances: 1
     path: ./users-service
+    command: python app.py
     routes:
       - route: users-service-metal-music-store.apps.tp.penso.io
     services:
