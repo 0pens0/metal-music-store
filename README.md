@@ -313,10 +313,6 @@ docker-compose logs order-service
 6. **Complete Order**: Use fake credit card details
 7. **View Orders**: Check order dashboard
 
-### Default User Accounts
-- **Admin**: `admin` / `admin` (for admin panel access)
-- **Customer**: `customer` / `password` (for regular user access)
-
 ### Test Credit Card Details
 - **Card Number**: Any 13-19 digit number
 - **Expiry**: Any future date (MM/YY format)
