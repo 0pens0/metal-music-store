@@ -126,6 +126,7 @@ Store Service ←→ Cart Service ←→ Order Service
 ### Store Service
 - ✅ Modern, responsive UI with tabbed interface
 - ✅ Album catalog with cover images
+- ✅ **6 sample albums included out of the box**
 - ✅ Admin panel for adding albums
 - ✅ Delete album functionality
 - ✅ Store statistics dashboard
