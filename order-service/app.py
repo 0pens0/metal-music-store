@@ -1,36 +1,89 @@
 from flask import Flask, render_template_string, request, jsonify
-import sqlite3
+import psycopg2
+import psycopg2.extras
 import os
 import json
 from datetime import datetime
 
 app = Flask(__name__)
 
-# Configuration
-ORDER_DB_PATH = os.environ.get('ORDER_DB_PATH', 'orders.db')
+def get_db_config():
+    """Get database configuration from VCAP_SERVICES (Cloud Foundry) or environment variables"""
+    vcap_services = os.environ.get('VCAP_SERVICES')
+    if vcap_services:
+        # Parse Cloud Foundry service binding
+        services = json.loads(vcap_services)
+        # Try different PostgreSQL service names
+        postgres_service = None
+        for service_type in ['postgresql', 'postgres', 'elephantsql', 'user-provided']:
+            if service_type in services and services[service_type]:
+                postgres_service = services[service_type][0]
+                break
+        
+        if postgres_service:
+            creds = postgres_service.get('credentials', {})
+            # Handle different credential structures
+            host = creds.get('primary_host') or creds.get('hostname') or creds.get('host')
+            if not host and creds.get('hosts'):
+                host = creds.get('hosts')[0]
+            database = creds.get('db') or creds.get('name') or creds.get('database')
+            user = creds.get('user') or creds.get('username')
+            password = creds.get('password')
+            port = creds.get('port', 5432)
+            return {
+                'host': host,
+                'port': port,
+                'database': database,
+                'user': user,
+                'password': password
+            }
+    
+    # Fall back to environment variables (Kubernetes/local)
+    return {
+        'host': os.environ.get('DB_HOST', 'localhost'),
+        'port': os.environ.get('DB_PORT', '5432'),
+        'database': os.environ.get('ORDER_DB_NAME', os.environ.get('DB_NAME', 'order_db')),
+        'user': os.environ.get('DB_USER', 'music_user'),
+        'password': os.environ.get('DB_PASSWORD', 'music_password')
+    }
+
+def get_db_connection():
+    """Get database connection"""
+    config = get_db_config()
+    return psycopg2.connect(
+        host=config['host'],
+        port=config['port'],
+        database=config['database'],
+        user=config['user'],
+        password=config['password']
+    )
 
 def init_order_db():
-    with sqlite3.connect(ORDER_DB_PATH) as conn:
-        c = conn.cursor()
-        c.execute('''CREATE TABLE IF NOT EXISTS orders (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            session_id TEXT NOT NULL,
-            order_number TEXT UNIQUE NOT NULL,
-            total_amount REAL NOT NULL,
-            status TEXT DEFAULT 'pending',
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-        )''')
-        c.execute('''CREATE TABLE IF NOT EXISTS order_items (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            order_id INTEGER NOT NULL,
-            album_id INTEGER NOT NULL,
-            album_name TEXT NOT NULL,
-            artist TEXT NOT NULL,
-            price REAL NOT NULL,
-            quantity INTEGER NOT NULL,
-            FOREIGN KEY(order_id) REFERENCES orders(id)
-        )''')
-        conn.commit()
+    """Initialize order database tables"""
+    try:
+        with get_db_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute('''CREATE TABLE IF NOT EXISTS orders (
+                    id SERIAL PRIMARY KEY,
+                    session_id VARCHAR(255) NOT NULL,
+                    order_number VARCHAR(255) UNIQUE NOT NULL,
+                    total_amount DECIMAL(10,2) NOT NULL,
+                    status VARCHAR(50) DEFAULT 'pending',
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                )''')
+                cur.execute('''CREATE TABLE IF NOT EXISTS order_items (
+                    id SERIAL PRIMARY KEY,
+                    order_id INTEGER NOT NULL,
+                    album_id INTEGER NOT NULL,
+                    album_name VARCHAR(255) NOT NULL,
+                    artist VARCHAR(255) NOT NULL,
+                    price DECIMAL(10,2) NOT NULL,
+                    quantity INTEGER NOT NULL,
+                    FOREIGN KEY(order_id) REFERENCES orders(id) ON DELETE CASCADE
+                )''')
+                conn.commit()
+    except Exception as e:
+        print(f"Error initializing order database: {e}")
 
 init_order_db()
 
@@ -60,25 +113,25 @@ def create_order():
         # Create order
         order_number = generate_order_number()
         
-        with sqlite3.connect(ORDER_DB_PATH) as conn:
-            c = conn.cursor()
-            
-            # Insert order
-            c.execute('''
-                INSERT INTO orders (session_id, order_number, total_amount, status)
-                VALUES (?, ?, ?, ?)
-            ''', (session_id, order_number, total, 'confirmed'))
-            
-            order_id = c.lastrowid
-            
-            # Insert order items
-            for item in items:
-                c.execute('''
-                    INSERT INTO order_items (order_id, album_id, album_name, artist, price, quantity)
-                    VALUES (?, ?, ?, ?, ?, ?)
-                ''', (order_id, item['album_id'], item['album_name'], item['artist'], item['price'], item['quantity']))
-            
-            conn.commit()
+        with get_db_connection() as conn:
+            with conn.cursor() as cur:
+                # Insert order
+                cur.execute('''
+                    INSERT INTO orders (session_id, order_number, total_amount, status)
+                    VALUES (%s, %s, %s, %s)
+                    RETURNING id
+                ''', (session_id, order_number, total, 'confirmed'))
+                
+                order_id = cur.fetchone()[0]
+                
+                # Insert order items
+                for item in items:
+                    cur.execute('''
+                        INSERT INTO order_items (order_id, album_id, album_name, artist, price, quantity)
+                        VALUES (%s, %s, %s, %s, %s, %s)
+                    ''', (order_id, item['album_id'], item['album_name'], item['artist'], item['price'], item['quantity']))
+                
+                conn.commit()
         
         return jsonify({
             'order_id': order_id,
@@ -94,24 +147,25 @@ def create_order():
 def get_orders():
     """API endpoint to get all orders"""
     try:
-        with sqlite3.connect(ORDER_DB_PATH) as conn:
-            c = conn.cursor()
-            orders = c.execute('''
-                SELECT o.id, o.order_number, o.total_amount, o.status, o.created_at,
-                       COUNT(oi.id) as item_count
-                FROM orders o
-                LEFT JOIN order_items oi ON o.id = oi.order_id
-                GROUP BY o.id
-                ORDER BY o.created_at DESC
-            ''').fetchall()
+        with get_db_connection() as conn:
+            with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+                cur.execute('''
+                    SELECT o.id, o.order_number, o.total_amount, o.status, o.created_at,
+                           COUNT(oi.id) as item_count
+                    FROM orders o
+                    LEFT JOIN order_items oi ON o.id = oi.order_id
+                    GROUP BY o.id
+                    ORDER BY o.created_at DESC
+                ''')
+                orders = cur.fetchall()
         
         return jsonify([{
-            'id': order[0],
-            'order_number': order[1],
-            'total_amount': order[2],
-            'status': order[3],
-            'created_at': order[4],
-            'item_count': order[5]
+            'id': order['id'],
+            'order_number': order['order_number'],
+            'total_amount': float(order['total_amount']),
+            'status': order['status'],
+            'created_at': str(order['created_at']),
+            'item_count': order['item_count']
         } for order in orders]), 200
         
     except Exception as e:
@@ -121,36 +175,37 @@ def get_orders():
 def get_order(order_id):
     """API endpoint to get a specific order with items"""
     try:
-        with sqlite3.connect(ORDER_DB_PATH) as conn:
-            c = conn.cursor()
-            
-            # Get order details
-            order = c.execute('''
-                SELECT id, order_number, total_amount, status, created_at
-                FROM orders WHERE id = ?
-            ''', (order_id,)).fetchone()
-            
-            if not order:
-                return jsonify({'error': 'Order not found'}), 404
-            
-            # Get order items
-            items = c.execute('''
-                SELECT album_id, album_name, artist, price, quantity
-                FROM order_items WHERE order_id = ?
-            ''', (order_id,)).fetchall()
+        with get_db_connection() as conn:
+            with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+                # Get order details
+                cur.execute('''
+                    SELECT id, order_number, total_amount, status, created_at
+                    FROM orders WHERE id = %s
+                ''', (order_id,))
+                order = cur.fetchone()
+                
+                if not order:
+                    return jsonify({'error': 'Order not found'}), 404
+                
+                # Get order items
+                cur.execute('''
+                    SELECT album_id, album_name, artist, price, quantity
+                    FROM order_items WHERE order_id = %s
+                ''', (order_id,))
+                items = cur.fetchall()
         
         return jsonify({
-            'id': order[0],
-            'order_number': order[1],
-            'total_amount': order[2],
-            'status': order[3],
-            'created_at': order[4],
+            'id': order['id'],
+            'order_number': order['order_number'],
+            'total_amount': float(order['total_amount']),
+            'status': order['status'],
+            'created_at': str(order['created_at']),
             'items': [{
-                'album_id': item[0],
-                'album_name': item[1],
-                'artist': item[2],
-                'price': item[3],
-                'quantity': item[4]
+                'album_id': item['album_id'],
+                'album_name': item['album_name'],
+                'artist': item['artist'],
+                'price': float(item['price']),
+                'quantity': item['quantity']
             } for item in items]
         }), 200
         
@@ -167,14 +222,14 @@ def update_order_status(order_id):
         if not new_status:
             return jsonify({'error': 'Status is required'}), 400
         
-        with sqlite3.connect(ORDER_DB_PATH) as conn:
-            c = conn.cursor()
-            c.execute('UPDATE orders SET status = ? WHERE id = ?', (new_status, order_id))
-            
-            if c.rowcount == 0:
-                return jsonify({'error': 'Order not found'}), 404
-            
-            conn.commit()
+        with get_db_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute('UPDATE orders SET status = %s WHERE id = %s', (new_status, order_id))
+                
+                if cur.rowcount == 0:
+                    return jsonify({'error': 'Order not found'}), 404
+                
+                conn.commit()
         
         return jsonify({'message': 'Order status updated successfully'}), 200
         
@@ -184,39 +239,41 @@ def update_order_status(order_id):
 @app.route('/')
 def orders_dashboard():
     """Dashboard to view all orders"""
-    with sqlite3.connect(ORDER_DB_PATH) as conn:
-        c = conn.cursor()
-        orders = c.execute('''
-            SELECT o.id, o.order_number, o.total_amount, o.status, o.created_at,
-                   COUNT(oi.id) as item_count
-            FROM orders o
-            LEFT JOIN order_items oi ON o.id = oi.order_id
-            GROUP BY o.id
-            ORDER BY o.created_at DESC
-        ''').fetchall()
+    with get_db_connection() as conn:
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute('''
+                SELECT o.id, o.order_number, o.total_amount, o.status, o.created_at,
+                       COUNT(oi.id) as item_count
+                FROM orders o
+                LEFT JOIN order_items oi ON o.id = oi.order_id
+                GROUP BY o.id
+                ORDER BY o.created_at DESC
+            ''')
+            orders = cur.fetchall()
     
     return render_template_string(ORDERS_DASHBOARD_HTML, orders=orders)
 
 @app.route('/order/<int:order_id>')
 def order_detail(order_id):
     """Detailed view of a specific order"""
-    with sqlite3.connect(ORDER_DB_PATH) as conn:
-        c = conn.cursor()
-        
-        # Get order details
-        order = c.execute('''
-            SELECT id, order_number, total_amount, status, created_at
-            FROM orders WHERE id = ?
-        ''', (order_id,)).fetchone()
-        
-        if not order:
-            return "Order not found", 404
-        
-        # Get order items
-        items = c.execute('''
-            SELECT album_id, album_name, artist, price, quantity
-            FROM order_items WHERE order_id = ?
-        ''', (order_id,)).fetchall()
+    with get_db_connection() as conn:
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            # Get order details
+            cur.execute('''
+                SELECT id, order_number, total_amount, status, created_at
+                FROM orders WHERE id = %s
+            ''', (order_id,))
+            order = cur.fetchone()
+            
+            if not order:
+                return "Order not found", 404
+            
+            # Get order items
+            cur.execute('''
+                SELECT album_id, album_name, artist, price, quantity
+                FROM order_items WHERE order_id = %s
+            ''', (order_id,))
+            items = cur.fetchall()
     
     return render_template_string(ORDER_DETAIL_HTML, order=order, items=items)
 
@@ -416,15 +473,15 @@ ORDERS_DASHBOARD_HTML = '''
                     <div class="stat-label">Total Orders</div>
                 </div>
                 <div class="stat-card">
-                    <div class="stat-number">${{"%.2f"|format(orders|sum(attribute=2))}}</div>
+                    <div class="stat-number">${{"%.2f"|format(orders|sum(attribute='total_amount'))}}</div>
                     <div class="stat-label">Total Revenue</div>
                 </div>
                 <div class="stat-card">
-                    <div class="stat-number">{{orders|selectattr(3, 'equalto', 'pending')|list|length}}</div>
+                    <div class="stat-number">{{orders|selectattr('status', 'equalto', 'pending')|list|length}}</div>
                     <div class="stat-label">Pending Orders</div>
                 </div>
                 <div class="stat-card">
-                    <div class="stat-number">{{orders|selectattr(3, 'equalto', 'confirmed')|list|length}}</div>
+                    <div class="stat-number">{{orders|selectattr('status', 'equalto', 'confirmed')|list|length}}</div>
                     <div class="stat-label">Confirmed Orders</div>
                 </div>
             </div>
@@ -444,15 +501,15 @@ ORDERS_DASHBOARD_HTML = '''
                 <tbody>
                     {% for order in orders %}
                     <tr>
-                        <td><strong>{{order[1]}}</strong></td>
-                        <td>{{order[4][:10]}}</td>
-                        <td>{{order[5]}} items</td>
-                        <td>${{"%.2f"|format(order[2])}}</td>
+                        <td><strong>{{order.order_number}}</strong></td>
+                        <td>{{order.created_at[:10]}}</td>
+                        <td>{{order.item_count}} items</td>
+                        <td>${{"%.2f"|format(order.total_amount)}}</td>
                         <td>
-                            <span class="status-badge status-{{order[3]}}">{{order[3]|title}}</span>
+                            <span class="status-badge status-{{order.status}}">{{order.status|title}}</span>
                         </td>
                         <td>
-                            <a href="/order/{{order[0]}}" class="btn">View Details</a>
+                            <a href="/order/{{order.id}}" class="btn">View Details</a>
                         </td>
                     </tr>
                     {% endfor %}
@@ -663,7 +720,7 @@ ORDER_DETAIL_HTML = '''
     <div class="container">
         <div class="header">
             <h1>📋 Order Details</h1>
-            <p>Order #{{order[1]}}</p>
+            <p>Order #{{order.order_number}}</p>
         </div>
 
         <div class="order-card">
@@ -672,15 +729,15 @@ ORDER_DETAIL_HTML = '''
                 <div class="order-info">
                     <div class="info-item">
                         <div class="info-label">Order Number:</div>
-                        <div class="info-value">{{order[1]}}</div>
+                        <div class="info-value">{{order.order_number}}</div>
                     </div>
                     <div class="info-item">
                         <div class="info-label">Date:</div>
-                        <div class="info-value">{{order[4]}}</div>
+                        <div class="info-value">{{order.created_at}}</div>
                     </div>
                     <div class="info-item">
                         <div class="info-label">Status:</div>
-                        <div class="info-value">{{order[3]|title}}</div>
+                        <div class="info-value">{{order.status|title}}</div>
                     </div>
                     <div class="info-item">
                         <div class="info-label">Items:</div>
@@ -695,11 +752,11 @@ ORDER_DETAIL_HTML = '''
                     {% for item in items %}
                     <li class="item">
                         <div class="item-header">
-                            <div class="item-name">{{item[1]}}</div>
-                            <div class="item-price">${{"%.2f"|format(item[3] * item[4])}}</div>
+                            <div class="item-name">{{item.album_name}}</div>
+                            <div class="item-price">${{"%.2f"|format(item.price * item.quantity)}}</div>
                         </div>
                         <div class="item-details">
-                            by {{item[2]}} • {{item[4]}}x ${{"%.2f"|format(item[3])}} each
+                            by {{item.artist}} • {{item.quantity}}x ${{"%.2f"|format(item.price)}} each
                         </div>
                     </li>
                     {% endfor %}
@@ -707,7 +764,7 @@ ORDER_DETAIL_HTML = '''
             </div>
 
             <div class="order-total">
-                <div class="total-amount">${{"%.2f"|format(order[2])}}</div>
+                <div class="total-amount">${{"%.2f"|format(order.total_amount)}}</div>
                 <div>Total Amount</div>
             </div>
 
@@ -720,5 +777,11 @@ ORDER_DETAIL_HTML = '''
 </html>
 '''
 
+@app.route('/health')
+def health():
+    """Health check endpoint"""
+    return jsonify({'status': 'healthy', 'service': 'order-service'})
+
 if __name__ == '__main__':
-    app.run(host='0.0.0.0', port=5001, debug=True) 
+    port = int(os.environ.get('PORT', 5001))
+    app.run(host='0.0.0.0', port=port, debug=True) 

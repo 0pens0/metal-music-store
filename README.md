@@ -24,7 +24,7 @@ The application is split into three independent microservices:
   - Remove items
   - Checkout process
   - Credit card payment simulation
-- **Database**: SQLite (`cart.db`)
+- **Database**: PostgreSQL (separate database or schema)
 
 ### 3. **Order Service** (Port 5001)
 - **Purpose**: Order processing and management
@@ -33,7 +33,7 @@ The application is split into three independent microservices:
   - Order tracking
   - Order dashboard
   - Order history
-- **Database**: SQLite (`orders.db`)
+- **Database**: PostgreSQL (separate database or schema)
 
 ### 4. **Database Service** (Port 5432)
 - **Purpose**: Centralized data storage
@@ -150,9 +150,10 @@ Store Service ←→ Cart Service ←→ Order Service
 ## 🛠️ Technology Stack
 
 - **Backend**: Python Flask
-- **Database**: PostgreSQL (centralized) + SQLite (cart/orders)
+- **Database**: PostgreSQL (all services)
 - **Frontend**: HTML, CSS, JavaScript
 - **Containerization**: Docker & Docker Compose
+- **Platforms**: Kubernetes, Cloud Foundry, Docker Compose
 - **Communication**: HTTP REST APIs
 
 ## 📁 Project Structure
@@ -217,6 +218,56 @@ kubectl apply -f k8s-cart-deployment.yaml
 kubectl apply -f k8s-order-deployment.yaml
 ```
 
+### Cloud Foundry
+
+#### Prerequisites
+- Cloud Foundry CLI installed
+- Access to `tanzu-platfrom-demo` organization
+- PostgreSQL service available in the organization
+
+#### Setup
+
+1. **Login to Cloud Foundry**:
+   ```bash
+   cf login -a <api-endpoint> -u <username> -o tanzu-platfrom-demo
+   ```
+
+2. **Create Space** (if not exists):
+   ```bash
+   cf create-space metal-music-store -o tanzu-platfrom-demo
+   ```
+
+3. **Target the Space**:
+   ```bash
+   cf target -o tanzu-platfrom-demo -s metal-music-store
+   ```
+
+4. **Create PostgreSQL Service** (if not exists):
+   ```bash
+   cf create-service postgresql <plan-name> postgres
+   ```
+   Note: Wait for the service to be created before proceeding.
+
+5. **Deploy All Services**:
+   ```bash
+   cf push
+   ```
+   This will deploy all 4 services (store-service, cart-service, order-service, users-service) from the single `manifest.yml` file.
+
+#### Service Routes
+
+After deployment, services will be available at:
+- **Store Service**: `https://store-service-metal-music-store.apps.tanzuplatformdemo.com`
+- **Cart Service**: `https://cart-service-metal-music-store.apps.tanzuplatformdemo.com`
+- **Order Service**: `https://order-service-metal-music-store.apps.tanzuplatformdemo.com`
+- **Users Service**: `https://users-service-metal-music-store.apps.tanzuplatformdemo.com`
+
+#### Notes
+- All services use PostgreSQL (migrated from SQLite for Cloud Foundry compatibility)
+- Each service uses a separate database within the same PostgreSQL instance
+- Service URLs are configured automatically via the manifest
+- Health check endpoints are available at `/health` for all services
+
 ### Individual Services
 ```bash
 # Store Service
@@ -271,8 +322,8 @@ docker-compose logs order-service
 - This is a demo application with simulated payments
 - No real payment processing is implemented
 - Session management uses simple Flask sessions
-- Main database is PostgreSQL (production-ready)
-- Cart and order services use SQLite (for simplicity)
+- All services use PostgreSQL (production-ready)
+- Database connections support both Cloud Foundry (VCAP_SERVICES) and Kubernetes/local (environment variables)
 - No authentication/authorization implemented
 
 ## 🚧 Future Enhancements

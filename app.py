@@ -2,6 +2,7 @@ from flask import Flask, render_template_string, request, redirect, url_for, sen
 import psycopg2
 import psycopg2.extras
 import os
+import json
 import requests
 from werkzeug.utils import secure_filename
 
@@ -23,6 +24,40 @@ UPLOAD_FOLDER = os.path.join(os.path.dirname(__file__), 'static', 'covers')
 
 def get_db_connection():
     """Get database connection"""
+    # Check for VCAP_SERVICES (Cloud Foundry)
+    vcap_services = os.environ.get('VCAP_SERVICES')
+    if vcap_services:
+        try:
+            services = json.loads(vcap_services)
+            # Try different PostgreSQL service names
+            postgres_service = None
+            for service_type in ['postgresql', 'postgres', 'elephantsql', 'user-provided']:
+                if service_type in services and services[service_type]:
+                    postgres_service = services[service_type][0]
+                    break
+            
+            if postgres_service:
+                creds = postgres_service.get('credentials', {})
+                # Handle different credential structures
+                host = creds.get('primary_host') or creds.get('hostname') or creds.get('host')
+                if not host and creds.get('hosts'):
+                    host = creds.get('hosts')[0]
+                database = creds.get('db') or creds.get('name') or creds.get('database')
+                user = creds.get('user') or creds.get('username')
+                password = creds.get('password')
+                port = creds.get('port', 5432)
+                
+                return psycopg2.connect(
+                    host=host,
+                    port=port,
+                    database=database,
+                    user=user,
+                    password=password
+                )
+        except Exception as e:
+            print(f"Error parsing VCAP_SERVICES: {e}")
+    
+    # Fall back to environment variables (Kubernetes/local)
     return psycopg2.connect(
         host=DB_HOST,
         port=DB_PORT,
@@ -1808,5 +1843,11 @@ def test_order_service():
             'error': str(e)
         })
 
+@app.route('/health')
+def health():
+    """Health check endpoint"""
+    return jsonify({'status': 'healthy', 'service': 'store-service'})
+
 if __name__ == '__main__':
-    app.run(host='0.0.0.0', port=5000, debug=True) 
+    port = int(os.environ.get('PORT', 5000))
+    app.run(host='0.0.0.0', port=port, debug=True) 

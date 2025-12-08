@@ -1,5 +1,6 @@
 from flask import Flask, render_template_string, request, redirect, url_for, session, jsonify
-import sqlite3
+import psycopg2
+import psycopg2.extras
 import os
 import requests
 import json
@@ -8,25 +9,79 @@ app = Flask(__name__)
 app.secret_key = 'cart-secret-key-here'
 
 # Configuration
-CART_DB_PATH = os.environ.get('CART_DB_PATH', 'cart.db')
 ORDER_SERVICE_URL = os.environ.get('ORDER_SERVICE_URL', 'http://localhost:5001')
 STORE_SERVICE_URL = os.environ.get('STORE_SERVICE_URL', 'http://localhost:5000')
 
+def get_db_config():
+    """Get database configuration from VCAP_SERVICES (Cloud Foundry) or environment variables"""
+    vcap_services = os.environ.get('VCAP_SERVICES')
+    if vcap_services:
+        # Parse Cloud Foundry service binding
+        services = json.loads(vcap_services)
+        # Try different PostgreSQL service names
+        postgres_service = None
+        for service_type in ['postgresql', 'postgres', 'elephantsql', 'user-provided']:
+            if service_type in services and services[service_type]:
+                postgres_service = services[service_type][0]
+                break
+        
+        if postgres_service:
+            creds = postgres_service.get('credentials', {})
+            # Handle different credential structures
+            host = creds.get('primary_host') or creds.get('hostname') or creds.get('host')
+            if not host and creds.get('hosts'):
+                host = creds.get('hosts')[0]
+            database = creds.get('db') or creds.get('name') or creds.get('database')
+            user = creds.get('user') or creds.get('username')
+            password = creds.get('password')
+            port = creds.get('port', 5432)
+            return {
+                'host': host,
+                'port': port,
+                'database': database,
+                'user': user,
+                'password': password
+            }
+    
+    # Fall back to environment variables (Kubernetes/local)
+    return {
+        'host': os.environ.get('DB_HOST', 'localhost'),
+        'port': os.environ.get('DB_PORT', '5432'),
+        'database': os.environ.get('CART_DB_NAME', os.environ.get('DB_NAME', 'cart_db')),
+        'user': os.environ.get('DB_USER', 'music_user'),
+        'password': os.environ.get('DB_PASSWORD', 'music_password')
+    }
+
+def get_db_connection():
+    """Get database connection"""
+    config = get_db_config()
+    return psycopg2.connect(
+        host=config['host'],
+        port=config['port'],
+        database=config['database'],
+        user=config['user'],
+        password=config['password']
+    )
+
 def init_cart_db():
-    with sqlite3.connect(CART_DB_PATH) as conn:
-        c = conn.cursor()
-        c.execute('''CREATE TABLE IF NOT EXISTS cart_items (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            session_id TEXT NOT NULL,
-            album_id INTEGER NOT NULL,
-            album_name TEXT NOT NULL,
-            artist TEXT NOT NULL,
-            price REAL NOT NULL,
-            quantity INTEGER NOT NULL,
-            cover_url TEXT,
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-        )''')
-        conn.commit()
+    """Initialize cart database tables"""
+    try:
+        with get_db_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute('''CREATE TABLE IF NOT EXISTS cart_items (
+                    id SERIAL PRIMARY KEY,
+                    session_id VARCHAR(255) NOT NULL,
+                    album_id INTEGER NOT NULL,
+                    album_name VARCHAR(255) NOT NULL,
+                    artist VARCHAR(255) NOT NULL,
+                    price DECIMAL(10,2) NOT NULL,
+                    quantity INTEGER NOT NULL,
+                    cover_url TEXT,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                )''')
+                conn.commit()
+    except Exception as e:
+        print(f"Error initializing cart database: {e}")
 
 init_cart_db()
 
@@ -42,15 +97,16 @@ def cart():
         # Use the provided session_id and store it in our session
         session['session_id'] = session_id
     
-    with sqlite3.connect(CART_DB_PATH) as conn:
-        c = conn.cursor()
-        cart_items = c.execute('''
-            SELECT * FROM cart_items 
-            WHERE session_id = ? 
-            ORDER BY created_at DESC
-        ''', (session_id,)).fetchall()
+    with get_db_connection() as conn:
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute('''
+                SELECT * FROM cart_items 
+                WHERE session_id = %s 
+                ORDER BY created_at DESC
+            ''', (session_id,))
+            cart_items = cur.fetchall()
     
-    total = sum(item[6] * item[5] for item in cart_items)  # quantity * price
+    total = sum(float(item['quantity']) * float(item['price']) for item in cart_items)
     
     return render_template_string(CART_HTML, cart_items=cart_items, total=total)
 
@@ -94,31 +150,31 @@ def add_to_cart():
             return jsonify({'error': f'Store service unavailable: {str(e)}'}), 503
     
     # Add to cart
-    with sqlite3.connect(CART_DB_PATH) as conn:
-        c = conn.cursor()
-        
-        # Check if item already in cart
-        existing = c.execute('''
-            SELECT id, quantity FROM cart_items 
-            WHERE session_id = ? AND album_id = ?
-        ''', (session_id, album_id)).fetchone()
-        
-        if existing:
-            # Update quantity
-            new_quantity = existing[1] + quantity
-            c.execute('''
-                UPDATE cart_items 
-                SET quantity = ? 
-                WHERE id = ?
-            ''', (new_quantity, existing[0]))
-        else:
-            # Add new item
-            c.execute('''
-                INSERT INTO cart_items (session_id, album_id, album_name, artist, price, quantity, cover_url)
-                VALUES (?, ?, ?, ?, ?, ?, ?)
-            ''', (session_id, album_id, album_name, artist, price, quantity, cover_url))
-        
-        conn.commit()
+    with get_db_connection() as conn:
+        with conn.cursor() as cur:
+            # Check if item already in cart
+            cur.execute('''
+                SELECT id, quantity FROM cart_items 
+                WHERE session_id = %s AND album_id = %s
+            ''', (session_id, album_id))
+            existing = cur.fetchone()
+            
+            if existing:
+                # Update quantity
+                new_quantity = existing[1] + quantity
+                cur.execute('''
+                    UPDATE cart_items 
+                    SET quantity = %s 
+                    WHERE id = %s
+                ''', (new_quantity, existing[0]))
+            else:
+                # Add new item
+                cur.execute('''
+                    INSERT INTO cart_items (session_id, album_id, album_name, artist, price, quantity, cover_url)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s)
+                ''', (session_id, album_id, album_name, artist, price, quantity, cover_url))
+            
+            conn.commit()
     
     # Return JSON response with session_id for store service to use
     return jsonify({
@@ -145,18 +201,18 @@ def update_quantity():
     
     if quantity <= 0:
         # Remove item
-        with sqlite3.connect(CART_DB_PATH) as conn:
-            c = conn.cursor()
-            c.execute('DELETE FROM cart_items WHERE id = ? AND session_id = ?', 
-                     (item_id, session_id))
-            conn.commit()
+        with get_db_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute('DELETE FROM cart_items WHERE id = %s AND session_id = %s', 
+                         (item_id, session_id))
+                conn.commit()
     else:
         # Update quantity
-        with sqlite3.connect(CART_DB_PATH) as conn:
-            c = conn.cursor()
-            c.execute('UPDATE cart_items SET quantity = ? WHERE id = ? AND session_id = ?', 
-                     (quantity, item_id, session_id))
-            conn.commit()
+        with get_db_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute('UPDATE cart_items SET quantity = %s WHERE id = %s AND session_id = %s', 
+                         (quantity, item_id, session_id))
+                conn.commit()
     
     return redirect(url_for('cart'))
 
@@ -174,11 +230,11 @@ def remove_item():
     
     item_id = int(request.form['item_id'])
     
-    with sqlite3.connect(CART_DB_PATH) as conn:
-        c = conn.cursor()
-        c.execute('DELETE FROM cart_items WHERE id = ? AND session_id = ?', 
-                 (item_id, session_id))
-        conn.commit()
+    with get_db_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute('DELETE FROM cart_items WHERE id = %s AND session_id = %s', 
+                     (item_id, session_id))
+            conn.commit()
     
     return redirect(url_for('cart'))
 
@@ -194,18 +250,19 @@ def checkout():
         # Use the provided session_id and store it in our session
         session['session_id'] = session_id
     
-    with sqlite3.connect(CART_DB_PATH) as conn:
-        c = conn.cursor()
-        cart_items = c.execute('''
-            SELECT * FROM cart_items 
-            WHERE session_id = ? 
-            ORDER BY created_at DESC
-        ''', (session_id,)).fetchall()
+    with get_db_connection() as conn:
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute('''
+                SELECT * FROM cart_items 
+                WHERE session_id = %s 
+                ORDER BY created_at DESC
+            ''', (session_id,))
+            cart_items = cur.fetchall()
     
     if not cart_items:
         return redirect(url_for('cart'))
     
-    total = sum(item[6] * item[5] for item in cart_items)
+    total = sum(float(item['quantity']) * float(item['price']) for item in cart_items)
     
     return render_template_string(CHECKOUT_HTML, cart_items=cart_items, total=total)
 
@@ -222,12 +279,13 @@ def process_payment():
         session['session_id'] = session_id
     
     # Get cart items
-    with sqlite3.connect(CART_DB_PATH) as conn:
-        c = conn.cursor()
-        cart_items = c.execute('''
-            SELECT * FROM cart_items 
-            WHERE session_id = ?
-        ''', (session_id,)).fetchall()
+    with get_db_connection() as conn:
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute('''
+                SELECT * FROM cart_items 
+                WHERE session_id = %s
+            ''', (session_id,))
+            cart_items = cur.fetchall()
     
     if not cart_items:
         return redirect(url_for('cart'))
@@ -290,20 +348,20 @@ def process_payment():
         return render_template_string(CHECKOUT_HTML, cart_items=cart_items, total=total, 
                                     error="Payment declined. Please check your card details and try again.")
     
-    # Prepare order data with shipping and billing information
-    order_data = {
-        'session_id': session_id,
-        'items': [
-            {
-                'album_id': item[2],
-                'album_name': item[3],
-                'artist': item[4],
-                'price': item[5],
-                'quantity': item[6]
-            }
-            for item in cart_items
-        ],
-        'total': sum(item[6] * item[5] for item in cart_items),
+        # Prepare order data with shipping and billing information
+        order_data = {
+            'session_id': session_id,
+            'items': [
+                {
+                    'album_id': item['album_id'],
+                    'album_name': item['album_name'],
+                    'artist': item['artist'],
+                    'price': float(item['price']),
+                    'quantity': item['quantity']
+                }
+                for item in cart_items
+            ],
+            'total': sum(float(item['quantity']) * float(item['price']) for item in cart_items),
         'shipping_info': {
             'first_name': request.form.get('shipping_first_name', '').strip(),
             'last_name': request.form.get('shipping_last_name', '').strip(),
@@ -334,10 +392,10 @@ def process_payment():
         response = requests.post(f"{ORDER_SERVICE_URL}/api/orders", json=order_data)
         if response.status_code == 201:
             # Clear cart after successful order
-            with sqlite3.connect(CART_DB_PATH) as conn:
-                c = conn.cursor()
-                c.execute('DELETE FROM cart_items WHERE session_id = ?', (session_id,))
-                conn.commit()
+            with get_db_connection() as conn:
+                with conn.cursor() as cur:
+                    cur.execute('DELETE FROM cart_items WHERE session_id = %s', (session_id,))
+                    conn.commit()
             
             # Store order details in session for success page
             session['order_details'] = order_data
@@ -587,31 +645,31 @@ CART_HTML = '''
                 {% for item in cart_items %}
                 <div class="cart-item">
                     <div>
-                        {% if item[7] %}
-                        <img src="{{item[7]}}" alt="Album cover" class="item-cover">
+                        {% if item.cover_url %}
+                        <img src="{{item.cover_url}}" alt="Album cover" class="item-cover">
                         {% else %}
                         <div class="item-cover" style="display: flex; align-items: center; justify-content: center; color: white; font-size: 0.8rem;">No Cover</div>
                         {% endif %}
                     </div>
                     
                     <div class="item-info">
-                        <h3>{{item[3]}}</h3>
-                        <p>by {{item[4]}}</p>
+                        <h3>{{item.album_name}}</h3>
+                        <p>by {{item.artist}}</p>
                     </div>
                     
-                    <div class="item-price">${{"%.2f"|format(item[5])}}</div>
+                    <div class="item-price">${{"%.2f"|format(item.price)}}</div>
                     
                     <div class="quantity-controls">
                         <form action="/update_quantity" method="post" style="display: flex; align-items: center; gap: 10px;">
-                            <input type="hidden" name="item_id" value="{{item[0]}}">
-                            <input type="number" name="quantity" value="{{item[6]}}" min="1" style="width: 60px;">
+                            <input type="hidden" name="item_id" value="{{item.id}}">
+                            <input type="number" name="quantity" value="{{item.quantity}}" min="1" style="width: 60px;">
                             <button type="submit" class="btn">Update</button>
                         </form>
                     </div>
                     
                     <div>
                         <form action="/remove_item" method="post">
-                            <input type="hidden" name="item_id" value="{{item[0]}}">
+                            <input type="hidden" name="item_id" value="{{item.id}}">
                             <button type="submit" class="btn btn-danger">Remove</button>
                         </form>
                     </div>
@@ -902,8 +960,8 @@ CHECKOUT_HTML = '''
                 <h3>📋 Order Summary</h3>
                 {% for item in cart_items %}
                 <div class="order-item">
-                    <span>{{item[6]}}x {{item[3]}} by {{item[4]}}</span>
-                    <span>${{"%.2f"|format(item[5] * item[6])}}</span>
+                    <span>{{item.quantity}}x {{item.album_name}} by {{item.artist}}</span>
+                    <span>${{"%.2f"|format(item.price * item.quantity)}}</span>
                 </div>
                 {% endfor %}
                 <div class="order-total">
@@ -1352,5 +1410,11 @@ SUCCESS_HTML = '''
 </html>
 '''
 
+@app.route('/health')
+def health():
+    """Health check endpoint"""
+    return jsonify({'status': 'healthy', 'service': 'cart-service'})
+
 if __name__ == '__main__':
-    app.run(host='0.0.0.0', port=5002, debug=True) 
+    port = int(os.environ.get('PORT', 5002))
+    app.run(host='0.0.0.0', port=port, debug=True) 
