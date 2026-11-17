@@ -54,3 +54,6 @@ ENV/
 *.sqlite
 *.sqlite3
 
+
+# App Advisor run logs
+.advisor/
